@@ -1,0 +1,246 @@
+---
+title: "2_extrac_sig"
+author: "zhengchen"
+date: "2022/6/30"
+output: html_document
+---
+
+# 1.load package and data
+
+```{r echo=FALSE,message=FALSE,warning=FALSE}
+rm(list = ls())
+library(MutationalPatterns)
+library(paletteer)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(dplyr)
+library(readr)
+library(plyr)
+library(readxl)
+library(ggplot2)
+library(MASS)
+library(splines)
+library(paletteer)
+library(Rmisc)
+library(cowplot)
+library(ggpubr)
+library(ggpmisc) 
+ref_genome <- "BSgenome.Hsapiens.UCSC.hg19"
+library(ref_genome, character.only = TRUE)
+library(BSgenome)
+library("gridExtra")
+library("NMF")
+library("ccfindR")
+library("TxDb.Hsapiens.UCSC.hg19.knownGene")
+library(biomaRt)
+library(rtracklayer)
+
+load(file = "../medianrdata/dbgrl_20245.Rdata")
+load(file = "../medianrdata/num_snv_107.Rdata")
+```
+
+
+# 2.prepare data
+
+```{r}
+# 2.1 mutation type
+#load("typeoccur.Rdata")
+type_occurrences <- mut_type_occurrences(grl, ref_genome)
+rownames(type_occurrences)=str_replace_all(rownames(type_occurrences),"_","-")
+type_occurrences= filter(type_occurrences, rownames(type_occurrences) %in% num_snv$sc)
+
+
+# 2.2 96 mutational profile
+mut_mat <- mut_matrix(vcf_list = grl, ref_genome = ref_genome,extension = 1)
+colnames(mut_mat)=str_replace_all(colnames(mut_mat),"_","-")
+mut_mat= mut_mat[,colnames(mut_mat) %in% num_snv$sc]
+
+```
+
+
+# 3.extract signature
+```{r}
+# 3.1 extract signature
+mut_mat_nmf <- mut_mat + 0.00001
+
+estimate <- nmf(mut_mat_nmf,rank = 2:7, method = "brunet",
+                nrun = 15, seed = 654321, .opt = "v-t")
+est=plot(estimate)
+
+ranks=3
+
+nmf_res<- extract_signatures(mut_mat_nmf, rank =ranks, nrun = 1000)
+colnames(nmf_res$signatures)=paste("signature",LETTERS[1:ranks])
+colnames(nmf_res$signatures)=paste("signature",c("B","A","C"))
+
+nmf_res$signatures=nmf_res$signatures[,c(2,1,3)]
+
+#relative contribution
+extract_sig=apply(nmf_res$signatures,2,function(x){x/sum(x)})
+
+# #reconstruction matrix
+fit_res <- fit_to_signatures(mut_mat, extract_sig)
+
+# 3.2 signature similarity
+
+signatures=get_known_signatures(muttype = "snv",source = "COSMIC")
+
+#cosine similarity
+cos_cosmic=as.data.frame(cos_sim_matrix(signatures,nmf_res$signatures))
+# cos_sci=as.data.frame(cos_sim_matrix(supp_sig,nmf_res$signatures))
+```
+
+
+#plot
+```{r}
+source(file = "2_plotfunc.R")
+s1=plot_sig96(extract_sig)+theme(axis.title.x = element_blank())
+
+s3=plot_sig_contribution(group,extract_sig)
+
+x1=plot_cos(cos_cosmic)
+s6=plot_sig_de(extract_sig,signatures)
+
+```
+
+
+# 3.4 plot_sig_contribution
+```{r}
+sig_contribution=function(mutmat=mut_mat,sig,group,grouping=rep("SNV",100),raw=F){
+  fit_res_con <- pool_mut_mat(mutmat,grouping = grouping) %>% fit_to_signatures(sig)
+  #fit_res_con$contribution
+  sig5per=apply( fit_res_con$contribution,2,function(x){x/sum(x)})
+  tmp=rownames(sig5per)[rowSums(sig5per>0.04)>0]%>% factor() %>% levels()
+  sigplot=sig[,colnames(sig) %in% tmp]
+  fit_res_p <- pool_mut_mat(mutmat,grouping = group) %>% fit_to_signatures(sigplot)
+  
+  if (raw) {
+  return(sig5per)
+  }
+  else {
+    return(fit_res_p$contribution)
+  }
+}
+
+#total
+x=sig_contribution(mut_mat,signatures,num_snv$sc,grouping = rep(1,100))
+apply(x,2,function(x){x/sum(x)})
+sig_table=sig_contribution(mut_mat,signatures,num_snv$sc,grouping = rep(1,100)) %>% t()%>%as.data.frame()
+#three group 
+sig_table_group=sig_contribution(mut_mat,signatures,num_snv$sc,grouping = num_snv$group) %>% t()%>%as.data.frame()
+
+#add group
+sig_table$sc=rownames(sig_table)
+sig_snv=left_join(num_snv,sig_table,by="sc")
+sig_snv[,13:18]=sig_snv[,13:18]/sig_snv$precent
+
+sig_table_group$sc=rownames(sig_table_group)
+sig_snv_group=left_join(num_snv,sig_table_group,by="sc")
+sig_snv_group[,13:19]=sig_snv_group[,13:19]/sig_snv_group$precent
+save(sig_snv,file = "../medianrdata/sig_snv.Rdata")
+save(sig_snv_group,file = "../medianrdata/sig_snv_group.Rdata")
+
+data=sig_snv
+data_g=sig_snv_group
+# #随机效应是不同的患者
+# data$patient=str_remove(data$patient,"N")
+# data$patient=str_remove(data$patient,"L")
+```
+
+#3.5 signature portion
+```{r}
+source("2_plotfunc.R")
+fit_res_con <- pool_mut_mat(mut_mat,grouping = rep("SNV",100)) %>% fit_to_signatures(signatures)
+fit1=plot_contribution(fit_res_con$contribution,coord_flip = FALSE,mode = "relative")
+
+color=paletteer_d(`"vapeplot::mallsoft"`)
+fit2=plot_contribution(sig_contribution(mutmat = mut_mat,signatures,group = rep("SNV",100)),coord_flip = F,mode = "relative",palette = color)+guides(fill=guide_legend(ncol   = 1,byrow = F))+theme(legend.position = "none",axis.text.x.bottom  = element_text(angle = 45))
+
+
+fit3=plot_contribution(sig_contribution(mutmat = mut_mat,signatures,num_snv$sc),coord_flip = FALSE,mode = "relative")+theme(axis.text.x =element_text(angle = 45,hjust = 1,size = 6))
+
+fit4=plot_contribution(sig_contribution(mutmat = mut_mat,   signatures,group = num_snv$group),coord_flip = F,mode = "relative",palette = color)+guides(fill=guide_legend(ncol   = 1,byrow = F))+theme(legend.position = "right",)
+
+refit1=sig_contribution(mut_mat,signatures,group = rep("SNV",100),T)
+refit2=sig_contribution(mut_mat,signatures,group = rep("SNV",100)) %>% apply(2,function(x){x/sum(x)})
+
+# ggsave("../result/50_sbs_fitall.tiff", plot = fit1,units = "in", 
+#        width =3, height = 4, dpi = 600, compression = 'lzw')
+# ggsave("../result/50_sbs_fit91.tiff", plot = fit2 ,units = "in", 
+#        width =20, height = 3, dpi = 600, compression = 'lzw')
+# 
+# ggsave("../manuscript3/P4/P4_u.pdf", plot = fit2 ,units = "in", 
+#        width =6, height = 2)
+# 
+# write.csv(refit1,file = "../result/refit_snv.csv")
+# write.csv(refit2,file = "../result/refit_snv_top.csv")
+
+```
+#3.5 three group
+```{r}
+source("2_plotfunc.R")
+fit_res_con <- pool_mut_mat(mut_mat,grouping = num_snv$group) %>% fit_to_signatures(signatures)
+fitg1=plot_contribution(fit_res_con$contribution,coord_flip = FALSE,mode = "relative")
+
+# color=c("#FFCE4EFF","#FBCFF3FF","#F7C0BBFF","#ACD0F4FF","#8CDB5EFF","#D6D6D6FF","#8690FFFF","#30BFDDFF","#7FD4C1FF")
+#paired
+paired_l=c("P13L","P15L","P21L","P7L")
+paired_n=c("P13N","P15N","P21N","P7N")
+
+group=num_snv$group
+group[num_snv$patient %in% paired_l]="OA lesion paired"
+group[num_snv$patient %in% paired_n]="OA non-lesion paired"
+color=paletteer_d(`"vapeplot::mallsoft"`)
+sig_con_all=cbind(sig_contribution(mutmat = mut_mat,signatures,group = rep("Total SNV",100)),sig_contribution(mutmat = mut_mat,signatures,group))
+fitg2=plot_contribution(sig_con_all,coord_flip = F,mode = "relative",palette = color)+guides(fill=guide_legend(ncol   = 1,byrow = F))+
+      theme(strip.background = element_rect(color = "black",fill = "white"),
+          panel.grid  = element_blank(),
+          axis.text.x = element_text(family = "sans",hjust = 0.75,vjust = 0.8,size =6,angle = 45),
+          axis.title.y = element_text(size = 7,family = "sans",vjust = 1), 
+          axis.text.y = element_text(size = 5,family = "sans"), 
+          axis.title.x = element_text(size = 7,family = "sans"), 
+          legend.key.size = unit(7, "pt"),
+          legend.margin = margin(0,0,0,-0.3,unit = "cm"),
+          legend.text = element_text(size = 5,family = "sans"),
+          legend.title = element_text(size = 5,family = "sans"))
+
+
+#>5%
+all_snv=sig_contribution(mutmat = mut_mat,signatures,group = rep("All SNV",100))%>% as.data.frame() %>% rownames_to_column()
+sig_OAL=sig_contribution(mutmat = mut_mat[,num_snv$group=="OA lesion"],sig=signatures,num_snv$group[num_snv$group=="OA lesion"],grouping = num_snv$group[num_snv$group=="OA lesion"]) %>% as.data.frame() %>% rownames_to_column()
+
+
+sig_nOA=sig_contribution(mutmat = mut_mat[,num_snv$group=="non-OA control"],sig=signatures,num_snv$group[num_snv$group=="non-OA control"],grouping = num_snv$group[num_snv$group=="non-OA control"])%>% as.data.frame() %>% rownames_to_column()
+# sig_OAL=rownames_to_column(sig_OAL)
+
+
+sig_OApl=sig_contribution(mutmat = mut_mat[,num_snv$patient %in% paired_l],sig=signatures,num_snv$group[num_snv$patient %in% paired_l],grouping = num_snv$group[num_snv$patient %in% paired_l])%>% as.data.frame() %>% rownames_to_column()
+sig_OApn=sig_contribution(mutmat = mut_mat[,num_snv$patient %in% paired_n],sig=signatures,num_snv$group[num_snv$patient %in% paired_n],grouping = num_snv$group[num_snv$patient %in% paired_n])%>% as.data.frame() %>% rownames_to_column()
+
+colnames(sig_OApl)[-1]="OA lesion paired"
+colnames(sig_OApn)[-1]="OA non-lesion paired"
+
+sig_con_all=full_join(all_snv,sig_nOA,by='rowname') %>% full_join(sig_OAL,by='rowname') %>% full_join(sig_OApl,by='rowname') %>%full_join(sig_OApn,by='rowname') %>% column_to_rownames(var = "rowname") 
+
+
+sig_con_all=sig_con_all[match(c("SBS4","SBS5","SBS6","SBS8","SBS19","SBS26","SBS29","SBS30","SBS44"),rownames(sig_con_all)),]
+color=c("#FFCE4EFF","#FBCFF3FF","#F7C0BBFF","#ACD0F4FF","#8CDB5EFF","#D6D6D6FF","#8690FFFF","#30BFDDFF","#7FD4C1FF")
+fitg3=plot_contribution(sig_con_all,coord_flip = F,mode = "relative",palette = color)+guides(fill=guide_legend(ncol   = 1,byrow = F))+
+      theme(strip.background = element_rect(color = "black",fill = "white"),
+          panel.grid  = element_blank(),
+          axis.text.x = element_text(family = "sans",hjust = 0.75,vjust = 0.8,size =6,angle = 45),
+          axis.title.y = element_text(size = 7,family = "sans",vjust = 1), 
+          axis.text.y = element_text(size = 5,family = "sans"), 
+          axis.title.x = element_text(size = 7,family = "sans"), 
+          legend.key.size = unit(7, "pt"),
+          legend.margin = margin(0,0,0,-0.3,unit = "cm"),
+          legend.text = element_text(size = 5,family = "sans"),
+          legend.title = element_text(size = 5,family = "sans"))
+
+
+
+sig_OAnL=sig_contribution(mutmat = mut_mat[,num_snv$group=="OA non-lesion"],sig=signatures,num_snv$group[num_snv$group=="OA non-lesion"],grouping = num_snv$group[num_snv$group=="OA non-lesion"])%>% as.data.frame() %>% rownames_to_column()
+
+
+```
