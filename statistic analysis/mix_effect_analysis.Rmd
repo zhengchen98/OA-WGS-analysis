@@ -146,7 +146,5 @@ p6=plot_in_box_OnO(data_in_OAnOAY,cn = "indelY",OAnOA_in_fit2Y,lim=20,seq =5 ,ti
 p7=plot_box_OnO_paired(data_p_sY,OApaired_fit2Y,cn = "SNVY",pp=t_paired,title = F,lim = 100,ti="SNVs per sample/ year")
 p8=plot_box_OnO_paired(data_in_p_sY,OApaired_in_fit2Y,cn = "indelY",pp=t_paired_in,lim=20,seq=5,ti = "InDels per sample/ year")
 
-(p23+p25)/(p24+p26)
-(p27+p29)/(p28+p30)
 ```
 
