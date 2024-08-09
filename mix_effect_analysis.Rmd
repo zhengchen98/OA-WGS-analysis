@@ -1,0 +1,152 @@
+---
+title: "mixed effect model"
+author: "zhengchen"
+date: "2024/6/24"
+output: html_document
+---
+# 1 prepare work
+### 1.1 load packages and data
+```{r message=FALSE, warning=FALSE}
+#rm(list = ls())
+library(paletteer)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(dplyr)
+library(readr)
+library(plyr)
+library(readxl)
+library(ggplot2)
+library(MASS)
+library(splines)
+library(paletteer)
+library(Rmisc)
+library(cowplot)
+library(ggpubr)
+library(ggpmisc) 
+library(tidyverse)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(MASS)
+library(patchwork)
+load("../medianrdata/num_snv_107.Rdata")
+# load("../medianrdata/num_snv.Rdata")
+# load("../medianrdata/num_snv_bsfore.Rdata")
+load("../medianrdata/base_info.Rdata")
+```
+### 1.1 prepare data
+```{r}
+data=num_snv
+#adjust sensitivity
+data$survey_adj=data$all22*data$sen22
+data$SNVY=data$SNVADJ/data$age
+```
+
+# 2 fit model
+### 2.1 generalized linear mixed model 
+```{r}
+#generalized linear mixed model 
+OA_fit0=lmer(SNVADJ ~ (1|patient),data = data)
+OA_fit1=lmer(SNVADJ ~ age+(1|patient),data = data)
+
+# Add grouping variables
+data$group=factor(data$group,levels = c("non-OA control","OA lesion","OA non-lesion"))
+OA_fit2=lmer(SNVADJ ~ age+group+(1|patient),data = data)
+
+data$group=factor(data$group,levels = c("OA non-lesion","OA lesion","non-OA control"))
+OA_fit3=lmer(SNVADJ ~ age+group+(1|patient),data = data)
+
+anova(OA_fit0,OA_fit1)
+anova(OA_fit1,OA_fit2)
+
+summary(OA_fit1)[["coefficients"]]
+summary(OA_fit2)[["coefficients"]]
+```
+
+### 2.2 The groups were fitted separately
+```{r}
+data$SNVADJ=round(data$SNVADJ,0)
+data_lesion=filter(data,group=="OA lesion")
+data_nonlesion=filter(data,group=="OA non-lesion")
+data_nonOA=filter(data,group=="non-OA control")
+
+#generalized linear mixed model 
+OA_fitg1=lmer(SNVADJ ~ age+(1|patient),data = data_nonOA)
+OA_fitg2=lmer(SNVADJ ~ age+(1|patient),data = data_nonlesion)
+OA_fitg3=lmer(SNVADJ ~ age+(1|patient),data = data_lesion)
+
+```
+### 2.3 Fitting in OA and non-OA only
+```{r}
+data$SNVADJ=round(data$SNVADJ,0)
+data_lesion_nonlesion=filter(data,group!="OA non-lesion")
+data_lesion_nonlesion$SNVADJ=data_lesion_nonlesion$SNVADJ/data_lesion_nonlesion$age
+#fit
+data_lesion_nonlesion$group=factor(data_lesion_nonlesion$group,levels = c("non-OA control","OA lesion"))
+OA_lnl_fit=lmer(SNVADJ ~ group+(1|patient),data = data_lesion_nonlesion)
+
+```
+## 3 Analyzing in paired samples
+### 3.1 Setting up the data
+```{r}
+#data of paired sample
+data_p=num_snv
+
+#The paired samples are then selected
+paired=c("P13L","P13N","P15L","P15N","P21L","P21N","P7L","P7N")
+data_p=data_p[data_p$patient %in% paired,]
+```
+
+### 3.2 generalized linear mixed model 
+```{r}
+# data_p$SNVADJ=round(data_p$SNVADJ,0)
+data_p$SNVADJ=data_p$SNVADJ/data_p$age
+data_p$group=factor(data_p$group,levels = c("OA non-lesion","OA lesion"))
+OApaired_fit2=lmer(SNVADJ ~ group+(1|patient),data = data_p)
+
+```
+### 4.Comparison between groups per year SNV accumulation rate
+
+```{r}
+data_sY=data
+## Add grouping variables
+data_sY$group=factor(data_sY$group,levels = c("non-OA control","OA lesion","OA non-lesion"))
+OA_sY_fit2=lm(SNVY ~ group,data = data_sY)
+
+data_sY$group=factor(data_sY$group,levels = c("OA non-lesion","OA lesion","non-OA control"))
+OA_sY_fit3=lm(SNVY ~ group,data = data_sY)
+#without non-lesion
+data_OAnOAY=filter(data_sY,group!="OA non-lesion")
+data_OAnOAY$group=factor(data_OAnOAY$group,levels = c("non-OA control","OA lesion"))
+OAnOA_fit2Y=lm(SNVY ~ group,data = data_OAnOAY)
+t_OAnOA=t.test(SNVY ~ group,data = data_OAnOAY,var.equal=TRUE)
+#paried sample
+data_p_sY=data_p
+data_p_sY$group=factor(data_p_sY$group,levels = c("OA non-lesion","OA lesion"))
+OApaired_fit2Y=lm(SNVY ~ group,data = data_p_sY)
+t_paired=t.test(SNVY ~ group,data = data_p_sY,var.equal=TRUE)
+
+```
+# 5 plot
+```{r}
+source("indel_plot.R")
+# p1=plot_fit(data,OA_fit2,OA_nb_fit2)
+# p3=plot_fit_in(data_in,OA_in_fit2,OA_in_nb_fit2)
+p1=plot_fit(data,OA_fit2,OA_fit2,title = F,lim = 6500)
+p2=plot_fit_sep(data_nonOA,data_nonlesion,data_lesion,OA_fitg1,OA_fitg2,OA_fitg3,0,title = F,lim = 6500)
+p3=plot_fit_in(data_in,OA_in_fit2,OA_in_fit2)
+p4=plot_fit_in_sep(data_in_nonOA,data_in_nonlesion,data_in_lesion,OA_in_fitg1,OA_in_fitg2,OA_in_fitg3,0)
+
+source("indel_plot_med_y.R")
+#sepreate
+p5=plot_box_OnO(data_OAnOAY,OAnOA_fit2Y,cn = "SNVY",title = F,lim = 100,ti="SNVs per sample/ year")
+p6=plot_in_box_OnO(data_in_OAnOAY,cn = "indelY",OAnOA_in_fit2Y,lim=20,seq =5 ,ti = "InDels per sample/ year")
+#paired
+p7=plot_box_OnO_paired(data_p_sY,OApaired_fit2Y,cn = "SNVY",pp=t_paired,title = F,lim = 100,ti="SNVs per sample/ year")
+p8=plot_box_OnO_paired(data_in_p_sY,OApaired_in_fit2Y,cn = "indelY",pp=t_paired_in,lim=20,seq=5,ti = "InDels per sample/ year")
+
+(p23+p25)/(p24+p26)
+(p27+p29)/(p28+p30)
+```
+
