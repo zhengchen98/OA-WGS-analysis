@@ -1,0 +1,409 @@
+---
+title: "6_go_ann"
+author: "zhengchen"
+date: "2024/6/29"
+output: html_document
+---
+# 1 prepare work
+### 1.1 load packages and data
+```{r message=FALSE,warning=FALSE}
+# rm(list=ls())
+library(stringr)
+library(tidyr)
+library(tibble)
+library(dplyr)
+library(readr)
+library(plyr)
+library(readxl)
+library(ggplot2)
+library(paletteer)
+library(Rmisc)
+library(cowplot)
+library(ggpubr)
+library(gplots)
+library(goseq)
+library(clusterProfiler)
+library(topGO)
+library(GO.db)
+library(reshape2)
+#install.packages("R.utils")
+R.utils::setOption("clusterProfiler.download.method",'auto') 
+#browseVignettes("goseq")
+library('org.Hs.eg.db')
+load("../medianrdata/snv.Rdata")
+load("../medianrdata/snvlist.Rdata")
+load("../medianrdata/num_snv_107.Rdata")
+```
+
+# 2. Data organization
+The goseq analysis object contains two sets of information: 1. gene ID; 2. whether it is differentially expressed. Among all reference genes, the presence of somatic mutations is considered differentially expressed and assigned the value T, and the absence of somatic mutations is assigned the value F.
+Consider mutation characteristics: 1. Selection of non-synonymous mutations
+```{r message=FALSE,warning=FALSE}
+outline=c("P1-4","P6-37","P13L-3","P15L-5","P21L-8","P21N-1","P21N-5")
+paired=c("P13L","P13N","P15L","P15N","P21L","P21N","P7L","P7N")
+paired_sc=num_snv$sc[num_snv$patient %in% paired]
+#view(snv_vcf)
+snv_vcf$group=num_snv$group[match(snv_vcf$sample,num_snv$sc)]
+snv_vcf=filter(snv_vcf,!sample %in% outline)
+gene_table=table(snv_vcf$Gene_ID,snv_vcf$group,snv_vcf$sample) %>% as.data.frame()
+#gene_table=filter(gene_table,Freq!=0)
+gene_table=gene_table[str_length(gene_table$Var1)==15,]
+
+# In all ref gene, mutations equal to there is an enrichment
+refgne=read.delim("../infodata/gene_RefSeqGene.txt")
+#refgne=refgne[!duplicated(refgne$Gene.stable.ID),]
+#转ENSEMBLE ID
+ref_ID= bitr(refgne$GeneID,fromType = 'ENTREZID',toType = 'ENSEMBL',OrgDb = 'org.Hs.eg.db')
+ref_ID=ref_ID[!duplicated(ref_ID$ENTREZID),]
+# refgne$GeneID=as.character(refgne$GeneID)
+# refgne2=right_join(EN_ID,refgne,by=c("ENTREZID"="GeneID"))
+
+
+table(gene_table$Var2)
+gene_OAlesion=ref_ID$ENSEMBL %in% gene_table$Var1[gene_table$Var2=="OA lesion" & gene_table$Freq!=0]
+gene_OAnonlesion=ref_ID$ENSEMBL %in% gene_table$Var1[gene_table$Var2=="OA non-lesion"& gene_table$Freq!=0]
+
+gene_OAlesionpair=ref_ID$ENSEMBL %in% gene_table$Var1[gene_table$Var2=="OA lesion" & gene_table$Freq!=0&gene_table$Var3 %in% paired_sc]
+gene_nonOAcontrol=ref_ID$ENSEMBL %in% gene_table$Var1[gene_table$Var2=="non-OA control"& gene_table$Freq!=0]
+
+#table(gene_OAlesion)
+names(gene_OAlesion)=ref_ID$ENTREZID
+names(gene_OAlesionpair)=ref_ID$ENTREZID
+names(gene_OAnonlesion)=ref_ID$ENTREZID
+names(gene_nonOAcontrol)=ref_ID$ENTREZID
+
+```
+
+# 3.GO analysis
+```{r fig.height=7, fig.width=7, message=FALSE, warning=FALSE}
+#go分析
+my_goseq=function(gene_x,raw=FALSE){
+  pwf=nullp(gene_x,"hg19","knownGene",plot.fit = F)
+  GO=goseq(pwf,"hg19","knownGene",method = "Wallenius")
+  GO$over_represented_pvalue_corrected=p.adjust(GO$over_represented_pvalue,method="fdr")
+  GO_filtered=GO[#GO$over_represented_pvalue<0.05&
+                   GO$numDEInCat>=10&
+                   GO$numInCat<=1000,]
+  if (!raw) {
+  GO_filtered  
+  }
+  else {
+  GO
+  }
+}
+
+go_OAlesion=my_goseq(gene_OAlesion)
+go_OAlesion$group="OA lesion"
+
+go_OAlesionpair=my_goseq(gene_OAlesionpair)
+go_OAlesionpair$group="OA lesion paired"
+
+go_nonOAcontrol=my_goseq(gene_nonOAcontrol)
+go_nonOAcontrol$group="non-OA control"
+
+go_OAnonlesion=my_goseq(gene_OAnonlesion)
+go_OAnonlesion$group="OA non-lesion"
+```
+#3.1 Test for goterm with differences between groups
+```{r message=FALSE,warning=FALSE}
+my.indexDiff <- function(go,input1,input2)
+{
+	a=which(input1$category==go)/nrow(input1)
+	b=which(input2$category==go)/nrow(input2)
+	if(length(a)==0)
+	{
+		a=1
+	}
+	if(length(b)==0)
+	{
+		b=1
+	}
+	a-b
+}
+
+
+#permutation test
+permutations_test=function(gene_x,gene_y,go_x,go_y,iteration){
+
+  go_x_list=as.character(go_x$category[go_x$over_represented_pvalue<0.01])
+  go_y_list=as.character(go_y$category[go_y$over_represented_pvalue<0.01])
+  go_list=unique(c(go_x_list,go_y_list))
+  idx_diff_permutation=numeric(0)
+
+  if (iteration>1) {
+  for (i in 1:iteration) {
+  gene_x=sample(gene_x)
+  gene_y=sample(gene_y)
+  names(gene_x)=ref_ID$ENTREZID
+  names(gene_y)=ref_ID$ENTREZID
+  go_x=my_goseq(gene_x)
+  go_y=my_goseq(gene_y)
+  idx_diff_permutation=rbind(idx_diff_permutation,
+                             sapply(go_list,function(x){my.indexDiff(x,go_x,go_y)})) 
+  print(paste0(i,"/",iteration))}  
+  }
+  else {
+  names(gene_x)=ref_ID$ENTREZID
+  names(gene_y)=ref_ID$ENTREZID
+  idx_diff_permutation=rbind(idx_diff_permutation,
+                             sapply(go_list,function(x){my.indexDiff(x,go_x,go_y)}))     
+  }
+  
+  as.data.frame(idx_diff_permutation)
+  
+}
+
+idx_diff=permutations_test(gene_OAlesion,gene_nonOAcontrol,go_OAlesion,go_nonOAcontrol,1)
+idx_diff_permutation=permutations_test(gene_OAlesion,gene_nonOAcontrol,go_OAlesion,go_nonOAcontrol,1000)
+
+idx_diff_pair=permutations_test(gene_OAlesionpair,gene_OAnonlesion,go_OAlesion,go_OAnonlesion,1)
+idx_diff_permutation_pair=permutations_test(gene_OAlesionpair,gene_OAnonlesion,go_OAlesion,go_OAnonlesion,1000)
+
+save(idx_diff,idx_diff_permutation,file = "../medianrdata/pernull.Rdata")
+save(idx_diff_pair,idx_diff_permutation_pair,file = "../medianrdata/pernull_pair.Rdata")
+
+
+gen_gotable=function(gene_x,gene_y){
+  go_x=my_goseq(gene_x)
+  go_x_raw=my_goseq(gene_x,raw = T)
+  go_y=my_goseq(gene_y)
+  go_y_raw=my_goseq(gene_y,raw = T)
+  
+  gene_x_list=names(gene_x)[gene_x]
+  gene_y_list=names(gene_y)[gene_y]  
+  
+  go_x_list=as.character(go_x$category[go_x$over_represented_pvalue<0.01])
+  go_y_list=as.character(go_y$category[go_y$over_represented_pvalue<0.01])
+  
+  go_list=unique(c(go_x_list,go_y_list))
+  gene_list=unique(c(names(gene_x)[gene_x],names(gene_y)[gene_y]))
+  gene_map=getgo(gene_list,"hg19","knownGene")
+  
+  go_table=data.frame(go_list,
+
+					 sapply(go_list,function(x){sum(gene_x_list %in% names(gene_map)[grep(x,gene_map)],na.rm=T)}),
+					 sapply(go_list,function(x){sum(gene_y_list %in% names(gene_map)[grep(x,gene_map)],na.rm=T)}),
+					 sum(gene_x,na.rm=T),
+					 sum(gene_y,na.rm=T),
+					 sapply(go_list,function(x){go_x_raw$numDEInCat[go_x_raw$category==x]}),
+					 sapply(go_list,function(x){go_y_raw$numDEInCat[go_y_raw$category==x]}),
+					 sapply(go_list,function(x){go_x_raw$numInCat[go_x_raw$category==x]}),
+					 sapply(go_list,function(x){go_x_raw$over_represented_pvalue[go_x_raw$category==x]}),
+					 sapply(go_list,function(x){go_y_raw$over_represented_pvalue[go_y_raw$category==x]}),
+					 sapply(go_list,function(x){go_x_raw$term[go_x_raw$category==x]}),
+					 sapply(go_list,function(x){go_x_raw$ontology[go_x_raw$category==x]})
+					)
+  
+   colnames(go_table)=c("category","hit_x","hit_y","total_x","total_y","numDE_x","numDE_y","numInCat","p_x","p_y","term","ontology")
+   go_table$corrected_p_x=p.adjust(go_table$p_x,method="fdr")
+   go_table$corrected_p_y=p.adjust(go_table$p_y,method="fdr")
+  go_table
+}
+
+go_table=gen_gotable(gene_OAlesion,gene_nonOAcontrol)
+go_table_pair=gen_gotable(gene_OAlesionpair,gene_OAnonlesion)
+
+save(go_table,file = "../medianrdata/gotable.Rdata")
+save(go_table_pair,file = "../medianrdata/gotable_pair.Rdata")
+```
+# 3.2 Selection of differential genes
+```{r}
+load(file = "../medianrdata/gotable.Rdata")
+load(file = "../medianrdata/gotable_pair.Rdata")
+load(file = "../medianrdata/pernull.Rdata")
+load(file = "../medianrdata/pernull_pair.Rdata")
+
+go_permutation=function(go_table,idx_diff,idx_diff_permutation){
+  go_table$p_permutation=sapply(1:nrow(go_table),
+                              function(x){
+                                if(idx_diff[x]<0){sum(idx_diff[,x]>idx_diff_permutation[,x])/length(idx_diff_permutation[,x])}
+                                else{sum(idx_diff[,x]<idx_diff_permutation[,x])/length(idx_diff_permutation[,x])}})
+go_table$corrected_p_permutation=p.adjust(go_table$p_permutation,method="fdr")
+#go_table$annotation=GOTERM[[go_table$category]]
+#write.table(go_table,file="GO.tsv",quote=F,sep="\t",row.names=F)
+go_table
+}
+
+go_table=go_permutation(go_table,idx_diff,idx_diff_permutation)
+go_table_pair=go_permutation(go_table_pair,idx_diff_pair,idx_diff_permutation_pair)
+
+
+plot_go_table=function(go_table,name_x,name_y,pos="none",warp=30){
+  go_table$p_deviance=-log10(go_table$corrected_p_x)+log10(go_table$corrected_p_y)
+  ready=go_table[go_table$corrected_p_x<0.05&go_table$corrected_p_y<0.05&go_table$p_permutation<0.01,c(1,11,12,13,14)] %>% melt()
+  colnames(ready)=c("GO","Term","ontology","Variable","Pvalue")
+  ready$p_devi=go_table$p_deviance[match(ready$Term,go_table$term)]
+  ready$Term=factor(ready$Term,levels=unique(ready$Term[order(ready$p_devi,decreasing = F)]))
+  ready$Tissue=factor(sapply(ready$Variable,function(x){if(grepl("x",x)){name_x}else if(grepl("y",x)){name_y}}),levels=c(name_y,name_x))
+  ready$Pconvert=-log10(ready$Pvalue)
+  color = c("#F8766D","#619CFF","#00BA38")
+  names(color)=c("OA lesion","OA non-lesion","non-OA control")
+ggplot() +
+     geom_col(data=ready,aes(x=Term,y=Pconvert,fill=Tissue),position="dodge") +
+     geom_hline(yintercept=-log10(0.05),linetype="dashed") +
+     scale_fill_manual(values = color[names(color) %in% c(name_y,name_x) ])+
+     xlab("") + ylab("-log10(FDR-adjusted P-value)") +
+     scale_y_continuous(expand = c(0,0),limits = c(0,8),breaks = seq(0,100,2))+
+     scale_x_discrete(labels=function(x) str_wrap(x, width=warp))+
+     #ggtitle(label = plot_name,)+
+     coord_flip() +theme_classic()+ 
+     theme(legend.position=pos,
+           legend.title = element_blank(),
+           legend.box.margin = margin(t=0,r=0,b=-25,l=-40,"pt"),
+           legend.text = element_text(size = 6,family = "sans"),
+           legend.key.height = unit(6,"pt"),
+           legend.key.width = unit(6,"pt"),
+           axis.text.x = element_text(size = 7,family = "sans"),
+           axis.text.y = element_text(size = 7,family = "sans"),
+           axis.title.x = element_text(size = 7,family = "sans",hjust = -0.2))
+}
+
+#color = c("#F8766D","#00BA38","#619CFF")
+#names(color)=c("nonOA control","OA lesion","OA nonlesion")
+
+p1=plot_go_table(go_table,"OA lesion","non-OA control",pos =c(0.95,0.99),warp=50)
+p2=plot_go_table(go_table_pair,"OA lesion","OA non-lesion",pos =c(0.95,0.99),warp=20)
+
+t1=go_table[go_table$corrected_p_x<0.05&go_table$corrected_p_y<0.05&go_table$p_permutation<0.01,c(1,11,12,13,14,15,16)]
+t2=go_table_pair[go_table_pair$corrected_p_x<0.05&go_table_pair$corrected_p_y<0.05&go_table_pair$p_permutation<0.01,c(1,11,12,13,14,15,16)]
+
+# ggsave("../result/49_go_OAlesion.tiff", plot = p1 ,units = "in", width =5, height =3.5, dpi = 600, compression = 'lzw')
+# ggsave("../result/50_go_OAlesion.tiff", plot = p2 ,units = "in", width =5, height =10, dpi = 600, compression = 'lzw')
+
+ggsave("../manuscript7/P6/go_1.pdf", plot = p1 ,units = "in", width =4.5, height =2.5)
+ggsave("../manuscript7/P6/go_2.pdf", plot = p2 ,units = "in", width =2.7, height =7.5)
+
+write.csv(t1,file = "../manuscript7/go_table1.csv",row.names = F)
+write.csv(t2,file = "../manuscript7/go_table_paired2.csv",row.names = F)
+```
+
+
+# 4.plot
+```{r}
+#各ontology，最显著的前十个
+plot_top10=function(go_x,plot_name,pos){
+   ready=go_x[,c(1,2,6:8)]
+   colnames(ready)=c("GO","Pvalue","Term","ontology","group")
+   ready$Pconvert=-log10(ready$Pvalue)
+   a=ready[order(ready$Pconvert,decreasing =T),] %>% filter(ontology=="BP") %>% head(5)
+   b=ready[order(ready$Pconvert,decreasing =T),] %>% filter(ontology=="CC") %>% head(5)
+   c=ready[order(ready$Pconvert,decreasing =T),] %>% filter(ontology=="MF") %>% head(5)
+
+   a$Term=factor(a$Term,levels = a$Term[order(a$Pconvert)])
+   b$Term=factor(b$Term,levels = b$Term[order(b$Pconvert)])
+   c$Term=factor(c$Term,levels = c$Term[order(c$Pconvert)])
+   
+   d=rbind(c,a,b)
+   d$ontology=factor(d$ontology,levels = c("CC","BP","MF"))
+   
+   p=ggplot() +
+     geom_col(data=d,aes(x=Term,y=Pconvert,fill= ontology),width = 0.75) +
+     geom_hline(yintercept=-log10(0.05),linetype="dashed") +
+     scale_fill_discrete(name="") + xlab("") + ylab("-log10(FDR-adjusted P-value)") +
+     scale_y_continuous(expand = c(0,0),limits = c(0,11),breaks = seq(0,100,5))+
+     scale_x_discrete(labels=function(x) str_wrap(x, width=30))+
+     scale_fill_manual(values = c("#DDAA33FF","#008348FF","#E13A3EFF"))+
+     ggtitle(label = plot_name,)+
+     coord_flip() +theme_classic()+ 
+     theme(legend.position=pos,
+           plot.title = element_text(hjust = 0.5),
+           axis.text.x = element_text(size = 11),
+           axis.text.y = element_text(size = 11),
+           )
+   
+   for (go in d$GO) {
+     print(GOTERM[[go]])
+     # print(GOTERM[[go]]@Ontology)
+     # print(GOTERM[[go]]@Definition)
+      cat("--------------------------------------\n")
+   }
+   p
+}
+
+
+```
+
+# 5.go_inter_plot
+
+```{r}
+#交集
+go_inter_plot=function(go_x,go_y,go_z){
+  go_x$Pconvert=-log10(go_x$over_represented_pvalue)
+  go_y$Pconvert=-log10(go_y$over_represented_pvalue)
+  go_z$Pconvert=-log10(go_z$over_represented_pvalue)
+  
+  
+  x=go_x[,c("category","Pconvert")]
+  y=go_y[,c("category","Pconvert")]
+  z=go_z[,c("category","ontology","Pconvert")]
+  a=inner_join(x,y,by= "category")
+  s=inner_join(z,a,by= "category")
+  s$ps=rowSums(s[,3:5])
+  
+ 
+plot_onto=function(X){
+  inner=s$category[s$ontology==X] %>%  head(10)
+  inall=rbind(
+    filter(go_x, category %in% inner),
+    filter(go_y, category %in% inner),
+    filter(go_z, category %in% inner)
+  )[,-c(2:5)]
+
+     for (go in inall$category) {
+     print(GOTERM[[go]])
+     # print(GOTERM[[go]]@Ontology)
+     # print(GOTERM[[go]]@Definition)
+      cat("--------------------------------------\n")
+   }   
+  ggplot() +
+     geom_col(data=inall,aes(x=term,y=Pconvert,fill= group),position="dodge") +
+     geom_hline(yintercept=-log10(0.05),linetype="dashed") +
+     scale_fill_discrete(name="") + xlab("") + ylab("-log10(FDR-adjusted P-value)") +
+     scale_y_continuous(expand = c(0,0),limits = c(0,25),breaks = seq(0,25,1))+
+     scale_x_discrete(labels=function(x) str_wrap(x, width=30))+
+     #ggtitle(label = plot_name,)+
+     #facet_wrap(~ontology)+
+     coord_flip() +theme_classic()+
+     theme(legend.position="bottom",plot.title = element_text(hjust = 0.5))  
+  
+
+  }
+
+print(s)
+
+CC=plot_onto("CC")   
+BP=plot_onto("BP")
+MF=plot_onto("MF")
+
+plot_grid(CC,BP,MF,
+          ncol = 3,labels = c("CC","BP","MF"))
+
+  
+}
+
+
+
+```
+
+# 6.plot
+
+```{r fig.height=4, fig.width=13}
+g1=plot_top10(go_OAlesion,"OA lesion",pos = "none")
+g2=plot_top10(go_OAnonlesion,"OA non-lesion","none")
+g3=plot_top10(go_nonOAcontrol,"non-OA control",pos = c(0.8,0.15))
+
+goterm=sapply(unique(go_table$category,go_table_pair$category),function(x){GOTERM[[x]]})
+goterm_t=sapply(names(goterm),function(x){rbind(goterm[[x]]@GOID,
+                                       goterm[[x]]@Term,
+                                       goterm[[x]]@Ontology,
+                                       goterm[[x]]@Definition)}) %>% t()
+
+colnames(goterm_t)=c("GOID","Term","Ontology","Definition")
+
+g1=filter(go_OAlesion,over_represented_pvalue_corrected<0.05)
+g2=filter(go_OAnonlesion,over_represented_pvalue_corrected<0.05)
+g3=filter(go_nonOAcontrol,over_represented_pvalue_corrected<0.05)
+
+```
+
+
