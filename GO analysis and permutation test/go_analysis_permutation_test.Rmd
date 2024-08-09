@@ -280,7 +280,6 @@ write.csv(t2,file = "../manuscript7/go_table_paired2.csv",row.names = F)
 
 # 4.plot
 ```{r}
-#各ontology，最显著的前十个
 plot_top10=function(go_x,plot_name,pos){
    ready=go_x[,c(1,2,6:8)]
    colnames(ready)=c("GO","Pvalue","Term","ontology","group")
@@ -326,7 +325,7 @@ plot_top10=function(go_x,plot_name,pos){
 # 5.go_inter_plot
 
 ```{r}
-#交集
+#intersection
 go_inter_plot=function(go_x,go_y,go_z){
   go_x$Pconvert=-log10(go_x$over_represented_pvalue)
   go_y$Pconvert=-log10(go_y$over_represented_pvalue)
